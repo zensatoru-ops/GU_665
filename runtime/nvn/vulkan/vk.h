@@ -61,6 +61,7 @@ void vk_unlock(void);
 // exit() has begun (set by device.c's atexit handler): driver calls are no longer safe, the process leaves
 // through _exit. Late guest threads park at vk_lock and drop their GPU waits.
 bool vk_exiting(void);
+void vk_pipeline_cache_checkpoint(void);  // (device.c) the pipeline cache is written to cache/ soon, on a thread of its own, if it grew
 
 // ---- submissions (exec.c)
 // Work is recorded into the current command buffer; uploads go into a separate one that runs first.

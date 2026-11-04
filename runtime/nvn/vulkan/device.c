@@ -12,9 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../overlay.h"
+#include "../../platform.h"
 #include "fsr.h"
 #include "fsr4.h"
 #include "vk.h"
@@ -75,6 +77,7 @@ static uint32_t instance_api;  // the Vulkan version asked of the instance
 extern bool maxwell_no_int64;   // (nvn/maxwell/translate.c)
 
 static uint32_t msaa_floor(uint32_t s);
+static void pcache_loaded(size_t size);  // (the pipeline cache is made: what the file held; starts the saver thread)
 #ifdef __ANDROID__
 PFN_vkGetInstanceProcAddr gpu_driver_loader(void);  // (platform/android_gpu.c)
 bool gpu_driver_surface(SDL_Window *win, VkInstance inst, VkSurfaceKHR *out);
@@ -354,18 +357,24 @@ static void create_device(void) {
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
+    pcache_loaded(pc.initialDataSize);  // (Android: the saver thread, below)
 }
 
+// (the exit handler and the saver thread below both write cache/vk_pipelines.bin: one at a time)
+static pthread_mutex_t pcache_file_lock = PTHREAD_MUTEX_INITIALIZER;
+static size_t pcache_saved_size;  // (under pcache_file_lock) what the file holds, as vkGetPipelineCacheData sized it
+
 static void pipeline_cache_save(void) {
+    pthread_mutex_lock(&pcache_file_lock);
     size_t sz = 0;
     void *data = NULL;
     VkResult res = VK_INCOMPLETE;
     // (the shader workers may add pipelines between the size and the data: VK_INCOMPLETE, asked again with the new size)
     for (int tries = 0; tries < 3 && res == VK_INCOMPLETE; tries++) {
         free(data), data = NULL;
-        if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+        if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) goto out;
         sz += 64 * 1024;  // (room for what is added meanwhile)
-        if (!(data = malloc(sz))) return;
+        if (!(data = malloc(sz))) goto out;
         res = vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data);
     }
     if (res == VK_SUCCESS) {
@@ -374,11 +383,87 @@ static void pipeline_cache_save(void) {
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
             fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
+            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); pcache_saved_size = sz; }
         }
     }
+out:
     free(data);
+    pthread_mutex_unlock(&pcache_file_lock);
 }
+
+#ifdef __ANDROID__
+// The pipeline cache used to be written only when the game exits (exit_handler). A phone with 3 or 4 GB of memory,
+// Android 10 especially, ends the game from the outside (lowmemorykiller, the recent apps list) without that ever
+// running: the cache of the whole session was lost and the next one compiled every pipeline again (the stutter of a
+// first run, each time). A thread of its own now writes it when it has grown: every PCACHE_EVERY_S seconds
+// (MHGU_PCACHE_SAVE_S=<s>, 0: only at exit), when the app goes to the background (ui.c) and when the shader prewarm
+// finishes (exec.c). It only writes what changed by PCACHE_MIN_GROWTH or more, or by anything when asked to.
+#define PCACHE_EVERY_S 120
+#define PCACHE_MIN_GROWTH (512 * 1024)
+static pthread_mutex_t pcache_wake_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pcache_wake_cond;
+static bool pcache_kicked, pcache_thread_started;
+
+static void *pcache_saver(void *arg) {
+    int every = (int)(intptr_t)arg;
+    plat_background_work(true);  // (nobody waits for it: the little cores, on the devices where that is set)
+    for (;;) {
+        struct timespec due;
+        clock_gettime(CLOCK_MONOTONIC, &due);
+        due.tv_sec += every;
+        pthread_mutex_lock(&pcache_wake_lock);
+        while (!pcache_kicked) {
+            if (pthread_cond_timedwait(&pcache_wake_cond, &pcache_wake_lock, &due) != 0) break;
+        }
+        bool asked = pcache_kicked;
+        pcache_kicked = false;
+        pthread_mutex_unlock(&pcache_wake_lock);
+        if (exiting || !g_vk.dev || !g_vk.pcache) continue;
+        size_t now = 0;
+        if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &now, NULL) != VK_SUCCESS || !now) continue;
+        pthread_mutex_lock(&pcache_file_lock);
+        size_t saved = pcache_saved_size;
+        pthread_mutex_unlock(&pcache_file_lock);
+        size_t growth = now > saved ? now - saved : 0;
+        if (growth < (asked ? 1 : PCACHE_MIN_GROWTH)) continue;
+        uint64_t t0 = plat_now_ns();
+        pipeline_cache_save();
+        LOG("[vk] pipeline cache saved: %zu KB (+%zu KB), %.0f ms\n", now >> 10, growth >> 10, (plat_now_ns() - t0) / 1e6);
+    }
+    return NULL;
+}
+
+static void pcache_saver_start(void);
+static void pcache_loaded(size_t size) {
+    pcache_saved_size = size;  // (what the file holds already; the saver writes only what is added)
+    pcache_saver_start();
+}
+
+static void pcache_saver_start(void) {
+    const char *e = getenv("MHGU_PCACHE_SAVE_S");
+    int every = e && *e ? atoi(e) : PCACHE_EVERY_S;
+    if (every <= 0 || pcache_thread_started) return;
+    pcache_thread_started = true;
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&pcache_wake_cond, &ca);
+    pthread_condattr_destroy(&ca);
+    pthread_t t;
+    if (pthread_create(&t, NULL, pcache_saver, (void *)(intptr_t)every) == 0) pthread_detach(t);
+}
+
+void vk_pipeline_cache_checkpoint(void) {
+    if (!pcache_thread_started) return;
+    pthread_mutex_lock(&pcache_wake_lock);
+    pcache_kicked = true;
+    pthread_cond_signal(&pcache_wake_cond);
+    pthread_mutex_unlock(&pcache_wake_lock);
+}
+#else
+static void pcache_loaded(size_t size) { (void)size; }
+void vk_pipeline_cache_checkpoint(void) {}
+#endif
 
 // An Adreno on a Vulkan 1.1 driver (seen: Adreno 710, 1.1.128) shows the 3D picture repeated in a grid over the screen with
 // a small 3D picture and no MSAA, in a hunt; with 2x it is right (the report's own test: 894x402). Why is not known and no

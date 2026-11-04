@@ -80,6 +80,14 @@ enum { PERF_GAME, PERF_RENDER, PERF_SUBMIT };
 void perf_hint_thread(int role);  // the calling thread is that one (after its first call: a thread-local load; for
                                   // PERF_SUBMIT also a store: the frames it submits in)
 void perf_hint_frame(void);       // a frame was presented (the presenting thread, once per frame)
+
+// ---- Snapdragon 665 class devices (Adreno 610: SM6125 "trinket", SM6115 / SM4250 / SM6225 "bengal"), android_perf.c
+// plat_weak_soc: this is one of them (MHGU_SOC_PROFILE=adreno610|none forces it either way, for tests).
+// plat_background_work(true): the calling thread is doing work nobody waits for (the shader prewarm): it moves to the
+// little cores at a lower priority so the big cores keep the game and render threads; (false) it gets its own place
+// back for the work a draw waits for. Does nothing off those devices (MHGU_BG_THREADS=0 turns it off there too).
+bool plat_weak_soc(void);
+void plat_background_work(bool on);
 #endif
 
 #ifdef __cplusplus

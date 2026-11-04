@@ -38,6 +38,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -440,4 +444,124 @@ void perf_hint_frame(void) {
         if (work) fn.report(s, (int64_t)work);
     }
     if (log_on) log_frame(work, s != NULL);
+}
+
+// ================================================================== Snapdragon 665 class devices (Adreno 610)
+// No ADPF on Android 10 (it starts at API 33), so the system gets no hint about which threads matter: the shader
+// prewarm's workers (3 compile + 1 translate threads, exec.c) then compete with the game and render threads for the
+// four big cores (Cortex-A73 class) while the four little ones (Cortex-A53 class) idle. Work nobody waits for goes to
+// the little cores at a lower priority; the jobs a draw waits for keep every core.
+// Not measured on a device yet: MHGU_BG_THREADS=0 turns it off, MHGU_ADPF_LOG / MHGU_VK_STATS show the effect.
+
+// SoCs with an Adreno 610: Snapdragon 665 (SM6125, board "trinket"), 662 (SM6115), 460 (SM4250), 680 (SM6225)
+// (board "bengal"). The GPU's own name is only known once Vulkan is up; the settings are read before that.
+bool plat_weak_soc(void) {
+    static int v = -1;
+    if (v >= 0) return v;
+    const char *e = getenv("MHGU_SOC_PROFILE");
+    if (e && *e) {
+        v = !strcasecmp(e, "adreno610") || !strcmp(e, "1");
+        LOG("[perf] MHGU_SOC_PROFILE=%s: Adreno 610 profile %s\n", e, v ? "on" : "off");
+        return v;
+    }
+    char plat[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.board.platform", plat);
+    __system_property_get("ro.soc.model", model);
+    static const char *const platforms[] = {"trinket", "bengal"};
+    static const char *const models[] = {"SM6125", "SM6115", "SM4250", "SM6225"};
+    int on = 0;
+    for (size_t i = 0; i < sizeof platforms / sizeof *platforms; i++)
+        if (!strcasecmp(plat, platforms[i])) on = 1;
+    for (size_t i = 0; i < sizeof models / sizeof *models; i++)
+        if (!strcasecmp(model, models[i])) on = 1;
+    v = on;
+    if (v) LOG("[perf] Adreno 610 class SoC (board %s, model %s): background work on the little cores\n", plat, model[0] ? model : "?");
+    return v;
+}
+
+static bool cpu_value(int cpu, const char *file, long *out) {
+    char path[96];
+    snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/%s", cpu, file);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    long x;
+    bool ok = fscanf(f, "%ld", &x) == 1;
+    fclose(f);
+    if (ok) *out = x;
+    return ok;
+}
+
+// CPU sets are used through the raw system calls and a mask of our own: <sched.h>'s cpu_set_t needs _GNU_SOURCE before
+// any system header, and the build force-includes volk.h (which pulls those in) ahead of this file's own define.
+#define MASK_WORDS 16  // up to 1024 CPUs
+typedef struct { unsigned long w[MASK_WORDS]; } CpuMask;
+#define MASK_BITS (8 * (int)sizeof(unsigned long))
+static void mask_set(CpuMask *m, int cpu) { m->w[cpu / MASK_BITS] |= 1ul << (cpu % MASK_BITS); }
+static int mask_count(const CpuMask *m) {
+    int n = 0;
+    for (int i = 0; i < MASK_WORDS; i++) n += __builtin_popcountl(m->w[i]);
+    return n;
+}
+static bool mask_get(CpuMask *m) {  // this thread's own
+    memset(m, 0, sizeof *m);
+    return syscall(SYS_sched_getaffinity, gettid(), sizeof *m, m->w) > 0;
+}
+static bool mask_apply(const CpuMask *m) { return syscall(SYS_sched_setaffinity, gettid(), sizeof *m, m->w) == 0; }
+
+// The little cores: those with a clearly lower capacity (cpu_capacity, or the top frequency where the kernel gives no
+// capacity: the Snapdragon 665's 1.8 against 2.0 GHz is 90%). False when they cannot be told, or fewer than two of
+// either kind exist: then nothing is pinned.
+static bool little_cores(CpuMask *set) {
+    static int known = -1;
+    static CpuMask found;
+    if (known < 0) {
+        int n = (int)sysconf(_SC_NPROCESSORS_CONF);
+        long v[MASK_WORDS * 64], top = 0;
+        bool ok = n >= 4 && n <= MASK_WORDS * MASK_BITS;
+        for (int i = 0; ok && i < n; i++) {
+            ok = cpu_value(i, "cpu_capacity", &v[i]) || cpu_value(i, "cpufreq/cpuinfo_max_freq", &v[i]);
+            if (ok && v[i] > top) top = v[i];
+        }
+        int little = 0, big = 0;
+        memset(&found, 0, sizeof found);
+        for (int i = 0; ok && i < n; i++) {
+            if (v[i] * 100 < top * 95) mask_set(&found, i), little++;
+            else big++;
+        }
+        known = ok && little >= 2 && big >= 2;
+        LOG("[perf] cores: %d little, %d big (%s)\n", little, big, known ? "background work goes to the little ones" : "no split: nothing pinned");
+    }
+    if (known) *set = found;
+    return known;
+}
+
+// Raising the priority back needs RLIMIT_NICE 20 or more (Android's init sets 40); without it the thread would stay low.
+static bool nice_restorable(void) {
+    struct rlimit rl;
+    return getrlimit(RLIMIT_NICE, &rl) == 0 && rl.rlim_cur >= 20;
+}
+
+void plat_background_work(bool on) {
+    static __thread int cur;  // 0 as the system had it, 1 in the background
+    static __thread CpuMask original;
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("MHGU_BG_THREADS");
+        enabled = e && *e ? atoi(e) != 0 : plat_weak_soc();
+    }
+    if (!enabled || (on ? 1 : 0) == cur) return;
+    pid_t tid = gettid();
+    if (on) {
+        CpuMask little;
+        bool low_prio = nice_restorable(), pin = little_cores(&little);
+        if (!low_prio && !pin) return;
+        if (!mask_get(&original)) memset(&original, 0, sizeof original);
+        if (pin && mask_count(&original)) mask_apply(&little);
+        if (low_prio) setpriority(PRIO_PROCESS, (id_t)tid, 10);
+        cur = 1;
+    } else {
+        if (mask_count(&original)) mask_apply(&original);
+        if (nice_restorable()) setpriority(PRIO_PROCESS, (id_t)tid, 0);
+        cur = 0;
+    }
 }

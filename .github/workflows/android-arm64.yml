@@ -1,0 +1,125 @@
+# Builds the public APK (arm64-v8a only) on GitHub's Linux runners: SDL3, FFmpeg and shaderc from their upstream sources,
+# then the runtime (libmain.so) with the NDK, then the APK with Gradle. The APK carries NO game code: libmhgugame.so
+# is made by each player from their own game files (tools/build_game.py), and this workflow fails if one ends up inside.
+# Nothing of the game is needed or touched here: no exefs, romfs, keys or generated/.
+name: Android arm64 APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dev_build:
+        description: "Test build (MHGU_DEV=1: reads files/env.txt and files/control.txt, for MHGU_VK_STATS and the like)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 27.0.12077973
+  CMAKE_VERSION: 3.22.1
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android NDK and CMake
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-35" "build-tools;34.0.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "$SDK/cmake/$CMAKE_VERSION/bin" >> "$GITHUB_PATH"
+
+      # SDL3 + FFmpeg + shaderc take most of the time: kept between runs while the scripts and versions stay the same
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/src
+            deps/out
+          key: deps-${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ hashFiles('ci/fetch_deps.sh', 'ci/build_deps.sh', 'ci/env.sh') }}
+
+      - name: Dependency sources
+        run: bash ci/fetch_deps.sh
+
+      - name: Build dependencies (SDL3, shaderc, FFmpeg)
+        run: bash ci/build_deps.sh
+
+      - name: Build the runtime (libmain.so and the rest)
+        env:
+          MHGU_DEV: ${{ inputs.dev_build && '1' || 'OFF' }}
+        run: bash ci/build_native.sh Release
+
+      # With the repository's secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
+      # ANDROID_KEY_PASSWORD the APK carries the project's own signature (so it updates over a release). Without them it
+      # is signed with a key made for this run: it installs, but not over an APK signed with another key.
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$STORE_PASS" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > mhgu.keystore
+            KEY_PASS=${KEY_PASS:-$STORE_PASS}
+            echo "Signing with the repository's key"
+          else
+            STORE_PASS=ci-throwaway-pass; KEY_ALIAS=ci; KEY_PASS=$STORE_PASS
+            keytool -genkeypair -keystore mhgu.keystore -storepass "$STORE_PASS" -keypass "$KEY_PASS" -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=MHGU CI build" > /dev/null
+            echo "::warning::No signing secrets: signed with a key made for this run"
+          fi
+          printf 'storePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$STORE_PASS" "$KEY_ALIAS" "$KEY_PASS" > keystore.properties
+
+      - name: Build the APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Check the APK
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          ls -la "$APK"
+          unzip -l "$APK" | grep -E "lib/arm64-v8a/" || { echo "no arm64 libraries in the APK"; exit 1; }
+          unzip -l "$APK" | grep -q "libmain.so" || { echo "libmain.so missing"; exit 1; }
+          if unzip -l "$APK" | grep -q "libmhgugame"; then echo "game code in the APK: never publish that"; exit 1; fi
+          unzip -l "$APK" | grep -q "lib/armeabi-v7a\|lib/x86" && { echo "unexpected ABIs"; exit 1; } || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MHGU-arm64-v8a-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # What the runtime's build said, for a failure somewhere far from the log's end
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-logs
+          path: |
+            native/build/*.log
+            deps/out/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7

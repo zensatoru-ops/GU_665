@@ -134,6 +134,10 @@ Android killing the game shows in `adb logcat` as `lowmemorykiller: Kill 'com.mh
 - Adreno 630 on Android 10 (driver 1.1.87): SIGSEGV in `vulkan.sdm845.so+1dd318`, from `vkCmdClearAttachments`. Drivers under 1.1.128 clear with draws
   (`clears_drawn`, `MHGU_CLEAR_FORCE=1` tests it anywhere). Adreno with Vulkan 1.1: below 720 lines and without MSAA the 3D picture repeats in a grid, so
   `msaa_floor` keeps 2x unless `[Performance] AdrenoFix = Off` (an Adreno 610 on 1.1.128 looked dark and flickered with it). Its cause is unknown.
+- Snapdragon 665 / Adreno 610 (Android 10): see `docs/SD665_ADRENO610.md`. The pipeline cache is now written while playing, not only at exit
+  (`device.c` saver thread: Android ends a 3 to 4 GB phone's game from outside), the prewarm's workers go to the little cores on that SoC class
+  (`plat_background_work`), and its first-run settings are the Low-end ones (`adreno610_profile`, `config.c`). None of it is measured on a device yet:
+  read the numbers off the on-screen counter before saying it is faster.
 - A romfs under 12.3 GB with all 35,531 files is an incomplete copy: a black picture, then `no function at 0`. The log warns.
 - `Config` gets its defaults by position: `CONFIG_DEFAULT_VALUES` in `config.c`. A new field in `config.h` needs its value there, in its
   place, or every later field moves (two added once turned most touch buttons off).

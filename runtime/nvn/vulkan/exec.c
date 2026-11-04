@@ -541,6 +541,7 @@ static void *worker(void *a) {
         pthread_mutex_lock(&q->lock);
         while (!q->head && !q->lhead) pthread_cond_wait(&q->cond, &q->lock);
         Job *j;
+        bool background = false;  // (the prewarm's list: nobody waits for it)
         if (q->head) {
             j = q->head;
             q->head = j->next;
@@ -549,8 +550,16 @@ static void *worker(void *a) {
             j = q->lhead;
             q->lhead = j->next;
             if (!q->lhead) q->ltail = NULL;
+            background = true;
         }
         pthread_mutex_unlock(&q->lock);
+#ifdef __ANDROID__
+        // (Snapdragon 665 class: four big cores shared with the game and render threads. The prewarm goes to the little
+        // cores at a lower priority, a build a draw waits for runs as before: platform/android_perf.c. Elsewhere a no-op)
+        plat_background_work(background);
+#else
+        (void)background;
+#endif
         j->fn(j->arg);
         free(j);
     }
@@ -2559,6 +2568,7 @@ static void prewarm_done(void) {
     LOG("[shader] prewarm: %llu programs translated, %llu already cached, %llu failed, %.1f s after the first one\n",
         (unsigned long long)atomic_load(&pw_total_new), (unsigned long long)atomic_load(&pw_total_known),
         (unsigned long long)atomic_load(&stat_pw_failed), (plat_now_ns() - pw_t0) / 1e9);
+    vk_pipeline_cache_checkpoint();  // (what the prewarm built is kept now, not only at exit: a phone may end the game before)
 }
 
 // (workers, low list) the SPIR-V into cache/spirv; then the sources go and the program is dormant, unless a draw

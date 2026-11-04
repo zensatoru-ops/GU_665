@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 
 #include "config.h"
+#include "platform.h"
 #include "rt.h"
 
 #include "keymap.h"
@@ -1020,6 +1021,44 @@ static void append_missing_sections(const char *path, const char *seen) {
     if (o) fclose(o);
 }
 
+#ifdef __ANDROID__
+// First run on a Snapdragon 665 class phone (Adreno 610: SM6125 and the other SoCs of platform.h's plat_weak_soc): the
+// settings file starts with what a GPU of that class can hold, instead of the defaults of a powerful phone. The same
+// values the menu's Low-end switch sets, with a 3D picture of half the screen's size (the switch says 40%), and
+// AdrenoFix off (device.c msaa_floor: an Adreno 610 on 1.1.128 was dark and flickering with it). Starting points,
+// not measurements: every one is a setting in the menu. Only a new file gets them: a phone with a file keeps its own
+// settings (delete mhgurecomp.ini to get these again). MHGU_SOC_PROFILE=none: the defaults, as everywhere else.
+#define ADRENO610_SCALE 50
+static const struct { const char *from, *to; } ADRENO610_INI[] = {
+    {"\nRenderScale = 100\n", "\nRenderScale = 50\n"},  // ADRENO610_SCALE
+    {"\nFPS = 60\n", "\nFPS = 30\n"},                    // (the game's own rate on a console; LOW_END_FPS)
+    {"\nLowEnd = Off\n", "\nLowEnd = On\n"},
+    {"\nShadows = On\n", "\nShadows = Off\n"},
+    {"\nBloom = On\n", "\nBloom = Off\n"},
+    {"\nAdrenoFix = Auto\n", "\nAdrenoFix = Off\n"},
+};
+static char adreno610_ini[sizeof DEFAULT_INI + 64];
+
+// DEFAULT_INI with those values; NULL if one of its lines is not where it was (the file's text changed: no profile)
+static const char *adreno610_profile(void) {
+    snprintf(adreno610_ini, sizeof adreno610_ini, "%s", DEFAULT_INI);
+    for (size_t i = 0; i < sizeof ADRENO610_INI / sizeof *ADRENO610_INI; i++) {
+        char *at = strstr(adreno610_ini, ADRENO610_INI[i].from);
+        size_t from = strlen(ADRENO610_INI[i].from), to = strlen(ADRENO610_INI[i].to);
+        if (!at || strlen(adreno610_ini) - from + to + 1 > sizeof adreno610_ini) return NULL;
+        memmove(at + to, at + from, strlen(at + from) + 1);
+        memcpy(at, ADRENO610_INI[i].to, to);
+    }
+    g_config.render_scale = ADRENO610_SCALE;
+    g_config.fps = LOW_END_FPS;
+    g_config.low_end = 1;
+    g_config.shadows = 0;
+    g_config.bloom = 0;
+    g_config.adreno_fix = 1;
+    return adreno610_ini;
+}
+#endif
+
 void config_load(void) {
     char path[1100];
     config_path(path, sizeof path);
@@ -1028,6 +1067,14 @@ void config_load(void) {
         FILE *o = fopen(path, "w");
         const char *ini = DEFAULT_INI, *lang = NULL;
 #ifdef __ANDROID__
+        if (plat_weak_soc()) {
+            const char *tuned = adreno610_profile();
+            if (tuned) {
+                ini = tuned;
+                LOG("[config] Adreno 610 class phone, first run: %d%% 3D picture, %d fps, Low-end mode on, no shadows or bloom\n",
+                    ADRENO610_SCALE, LOW_END_FPS);
+            }
+        }
         // (a phone set to Spanish: the settings menu in Spanish from the start)
         int nloc = 0;
         SDL_Locale **loc = SDL_GetPreferredLocales(&nloc);

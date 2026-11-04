@@ -160,6 +160,7 @@ static void set_fullscreen(bool on) {
 // [Application] PauseInBackground the game stops meanwhile too (runtime/hle/vi.c).
 extern volatile int g_android_window_state;
 void vi_set_paused(bool on);
+void vk_pipeline_cache_checkpoint(void);  // (nvn/vulkan/device.c)
 static bool android_lifecycle(void *ud, SDL_Event *e) {
     (void)ud;
     switch (e->type) {
@@ -172,6 +173,8 @@ static bool android_lifecycle(void *ud, SDL_Event *e) {
         touch_reset();
         haptics_stop();  // (a rumble playing would run out its last pulse)
         if (config_live_pause_background()) vi_set_paused(true);
+        // (a phone short of memory may end the app while it is away: the pipeline cache is written now, on its own thread)
+        vk_pipeline_cache_checkpoint();
         break;
     case SDL_EVENT_DID_ENTER_FOREGROUND:
         __atomic_store_n(&g_android_window_state, 2, __ATOMIC_RELEASE);
