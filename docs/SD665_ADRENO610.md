@@ -50,7 +50,7 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
    the 3D picture repeats in a grid at a low resolution with this, that is the bug the floor was for: say so, with the log.
 8. **The hot threads stay on the big cores** (`android_perf.c` `hot_thread_to_big_cores`, called from `perf_hint_thread` the
    first time a thread gives a role: the game's update thread, the presenting one, the one translating command lists; SD665
-   class only). Affinity only, no priority change. Logged as `[perf] thread <tid>: 4 big cores`. `MHGU_HOT_PIN=0` turns it off.
+   class only). Affinity only, no priority change, and only when the thread may use at least 3 big cores (three threads share them; a log of one phone showed 2 allowed in one run and 4 in another): else `[perf] thread <tid>: only N big core(s) allowed to it: not pinned`. Logged as `[perf] thread <tid>: 4 big cores`. `MHGU_HOT_PIN=0` turns it off.
 
 9. **The HUD at most 720 lines on this class** (`config.c`, Low-end mode On): the Low-end rule keeps the HUD at the screen's size up
    to twice the 3D picture's height; at 40% of a 1080-line screen that is 864 lines, 4 times the 3D's pixels, alpha blended
@@ -62,15 +62,15 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
    writes visible to every stage as before, and the passes' attachment writes visible to the later fragment stages, tests,
    output, transfers and compute only. It leaves out a vertex shader reading what an earlier pass drew or a fragment shader
    stored. Whether this driver gains from it is not known: A/B it, and watch the picture for flicker or missing parts.
-11. **The shadow atlas's clear draws are clears** (`exec.c` `shadow_clear_draw`, SD665 class by default): the game clears its shadow
-    atlas with three draws (a few vertices, depth test Always, depth written, depth-only target that is not the picture's
-    size), 2.3 of the shadow pass's 2.8 ms on a Mali. Such a draw is now `vkCmdClearAttachments` to the far depth within its
-    own scissor. Shadows stay on and are drawn as before. Logged as `[vk] shadow atlas WxH: a N-vertex draw is a clear`
-    (the first three, then every 3000th). `MHGU_SHADOW_CLEARDRAW=0` off, `=1` on any device. If a shadow caster is missing or the
-    shadows look wrong with it, the match was too wide: send that log line.
+11. **Anisotropic filtering capped at 2x** (`textures.c` `aniso_cap`, SD665 class by default): the game's samplers ask for up to 16
+    taps a sample, which Low-end mode switches off altogether; this class is fragment-bound (a phone's own profile: two
+    936x432 scene passes were 27 of 40 ms), and the 3D picture is small and stretched. `MHGU_MAX_ANISO=<1..16>` sets it on any
+    device (16 is the game's own). `MHGU_MIP_NEAREST=1` (a test, off by default) makes samplers pick the nearest mip level, as
+    Low-end mode does. The shadow atlas clear conversion tried before was taken out: it never matched on that phone (its driver
+    is 1.1.87, where every clear is a draw anyway) and the shadow pass is 0.6 to 3.6 ms there.
 12. **A GPU profile of its own** (`exec.c` `gpuprof_auto`, SD665 class by default): `gpuprof` takes one frame's time per pass, but needs
     `control.txt` and a test build. On this class one frame is profiled 40 s after the first frame and then every 60 s, 12 in all
-    (a hitch of one frame each), logged as `[gpuprof] ...` in `log.txt` with a header line (3D size, HUD size, FPS limit,
+    (a hitch of one frame each), logged as `[gpuprof] ...` in `log.txt` (each pass labelled with the fragment program of its first draw, `1st fs <hash>`) with a header line (3D size, HUD size, FPS limit,
     MSAA, shadows, bloom, Low-end). `MHGU_GPUPROF_AUTO=<seconds>` sets the period on any device (test builds), 0 never.
 
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,

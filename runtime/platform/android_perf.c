@@ -587,6 +587,15 @@ static void hot_thread_to_big_cores(void) {
     if (!little_cores(&little) || !mask_get(&now)) return;
     big = found_big;
     for (int i = 0; i < MASK_WORDS; i++) big.w[i] &= now.w[i];  // (only what this thread may use already)
-    if (mask_count(&big) < 2 || !mask_apply(&big)) return;
-    LOG("[perf] thread %d: %d big cores\n", (int)gettid(), mask_count(&big));
+    // (three threads rest the frame rate on these: the game's, the presenting one and the one translating command lists.
+    // On a phone whose system lets the app use only two of the big cores at the moment (a game mode: seen in a log, "2 big cores"
+    // beside "4" in another run of the same phone) pinning them there would put three threads on two cores: left alone)
+    int n = mask_count(&big);
+    if (n < 3) {
+        static bool said;
+        if (!said) LOG("[perf] thread %d: only %d big core(s) allowed to it: not pinned\n", (int)gettid(), n), said = true;
+        return;
+    }
+    if (!mask_apply(&big)) return;
+    LOG("[perf] thread %d: %d big cores\n", (int)gettid(), n);
 }

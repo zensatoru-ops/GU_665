@@ -1140,6 +1140,7 @@ static void dump_pass(void) {
 // GPU timestamps between the passes (and MSAA resolves) of the next frame, logged in milliseconds by vk_gpuprof_frame.
 volatile int g_gpuprof_request;
 static int gp_active, gp_n, gp_pass;
+static uint64_t gp_pass_fs;  // the fragment program of the pass's first draw (its label in the profile)
 static VkQueryPool gp_pool;
 static char gp_label[256][64];
 
@@ -1227,8 +1228,9 @@ void vk_end_pass(void) {
     in_pass = false;
     if (gp_active) {
         char l[64];
-        snprintf(l, sizeof l, "pass %d %ux%u%s, %llu draws%s", gp_pass++, pass_w, pass_h, pass_msaa ? " MSAA" : "",
-                 (unsigned long long)(stat_draws - pass_draws_at), pass_noload ? ", cleared as it began" : "");
+        snprintf(l, sizeof l, "pass %d %ux%u%s, %llu draws, 1st fs %016llx%s", gp_pass++, pass_w, pass_h, pass_msaa ? " MSAA" : "",
+                 (unsigned long long)(stat_draws - pass_draws_at), (unsigned long long)gp_pass_fs, pass_noload ? ", cleared as it began" : "");
+        gp_pass_fs = 0;
         gp_mark(l);
     }
     if (pass_msaa) for (uint32_t k = 0; k < pass_natt; k++) pass_att[k]->ms_dirty = true;
@@ -4145,38 +4147,9 @@ static bool shadow_skipped(void) {
     return true;
 }
 
-// The game clears its shadow atlas with draws, not a clear (see shadow_skipped): three of them, a few vertices each, depth
-// test Always, depth written, nothing else, into a depth-only target that is not the picture's size. On a Mali they were 2.3 ms
-// of the shadow pass's 2.8. Here such a draw is the clear it stands for, to the far depth (the value shadow_skipped clears
-// to, and Shadows Off showed it is the one nothing is in the way of), within the draw's own scissor: vkCmdClearAttachments,
-// no pipeline, no fragment work. The shadows stay on and are drawn as before.
-// On the Adreno 610 class by default; MHGU_SHADOW_CLEARDRAW=1 anywhere, =0 never. A draw of that kind that is not a
-// clear would leave a shadow caster out (a hole in the shadows): that, or shadows that look wrong, is the sign to turn it off.
-static bool shadow_clear_draw(CmdRec *r) {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("MHGU_SHADOW_CLEARDRAW");
-        on = e && *e ? atoi(e) != 0 : 0;
-#ifdef __ANDROID__
-        if (!(e && *e)) on = plat_weak_soc();
-#endif
-        if (on) LOG("[vk] shadow atlas clear draws become clears (MHGU_SHADOW_CLEARDRAW=0: off)\n");
-    }
-    if (!on || st.rt.ncolor || !st.rt.depth || (uint32_t)r->x[2] > 6) return false;
-    NvnTexture *d = st.rt.depth;
-    if ((d->width < 512 && d->height < 512) || (d->width == g_render_size[0] && d->height == g_render_size[1])) return false;
-    if (!st.ds[0] || !st.ds[1] || compare_fn(st.ds[2]) != VK_COMPARE_OP_ALWAYS || st.ds[3]) return false;  // (Always, written, no stencil)
-    static unsigned seen;
-    if (seen++ < 3 || seen % 3000 == 0)
-        LOG("[vk] shadow atlas %ux%u: a %u-vertex draw is a clear (%u so far)\n", d->width, d->height, (unsigned)r->x[2], seen);
-    clear(-1, 0, NULL, 0, true, 1.0f, false, 0, 0);
-    return true;
-}
-
 static void draw(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     if (shadow_skipped()) { stat_skipped++; return; }
-    if (shadow_clear_draw(r)) { stat_skipped++; return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -4189,6 +4162,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (!await_build(&pr->state, pr, 0)) { skip_draw(&stat_skip_prog); return; }
     fs_new(pr, (uint32_t)r->x[2]);
     if (fxaa_skipped(pr) || lowend_skipped(pr)) return;
+    if (gp_active && !gp_pass_fs) gp_pass_fs = prog_fs_hash(pr);  // (the profile's label for this pass)
     NvnTexture *movie = movie_picture(pr);
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;

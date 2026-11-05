@@ -11,6 +11,7 @@
 #include "../astc.h"
 #include <unistd.h>
 #include "../bcn.h"
+#include "../../platform.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -858,6 +859,33 @@ static VkCompareOp compare_op(uint32_t f) {
     }
 }
 
+// Anisotropic filtering is up to 16 taps a sample, on whatever the game's sampler asks for (Low-end mode switches it off
+// altogether). The Adreno 610 class is limited by its fragment work (a hunt's two big 936x432 scene passes were 27 of 40 ms in
+// its GPU profile), and the 3D picture is small and stretched, so the extra taps cost far more than they show: capped at
+// 2x there. MHGU_MAX_ANISO=<1..16> sets it on any device (16: the game's own, 1: off); not set: 2 on that class, no cap elsewhere.
+static int aniso_cap(void) {
+    static int cap;
+    if (!cap) {
+        const char *e = getenv("MHGU_MAX_ANISO");
+        int v = e && *e ? atoi(e) : 0;
+        cap = v >= 1 && v <= 16 ? v : 16;
+#ifdef __ANDROID__
+        if (!(v >= 1 && v <= 16) && plat_weak_soc()) cap = 2;
+#endif
+        if (cap < 16) LOG("[vk] anisotropic filtering capped at %dx (MHGU_MAX_ANISO=16: the game's own)\n", cap);
+    }
+    return cap;
+}
+// MHGU_MIP_NEAREST=1 (a test, off by default): samplers pick the nearest mip level instead of blending two (Low-end mode does it)
+static bool mip_nearest_forced(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MHGU_MIP_NEAREST");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 VkSampler vk_sampler(NvnSamplerDesc *d) {
     if (d->backend) return (VkSampler)d->backend;
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -888,8 +916,10 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     if (mf > 1) si.mipLodBias += g_fsr_lod_bias;  // (FSR: textures as sharp as at the output size; config.c)
     const char *force = getenv("MHGU_TEX_LOD");  // (debug) mipmapped samplers: only this level (shows mip contents)
     if (force && mf > 1) { si.minLod = si.maxLod = (float)atof(force); si.mipLodBias = 0; }
-    if (d->max_aniso > 1 && !g_config.low_end) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
-    if (g_config.low_end && mf > 1) {  // (one texture fetch for each: a Mali's trilinear takes two)
+    float aniso = d->max_aniso;
+    if (aniso > 1 && !g_config.low_end && aniso > (float)aniso_cap()) aniso = (float)aniso_cap();  // (the weak GPU's cap, above)
+    if (aniso > 1 && !g_config.low_end) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(aniso, 16); }
+    if ((g_config.low_end || mip_nearest_forced()) && mf > 1) {  // (one texture fetch for each: a Mali's trilinear takes two)
         si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     }
     if (d->compare_mode) { si.compareEnable = VK_TRUE; si.compareOp = compare_op(d->compare_func); }
