@@ -469,8 +469,27 @@ void vk_pipeline_cache_checkpoint(void) {}
 // a small 3D picture and no MSAA, in a hunt; with 2x it is right (the report's own test: 894x402). Why is not known and no
 // device here does it, so those drivers keep 2x below 720 lines, and nothing else changes
 // [Performance] AdrenoFix Off: never (an Adreno 610 on 1.1.128 was dark and flickering with it, at 40 to 70%; and 2x costs)
+// The Adreno 610 (Snapdragon 665 / 662 / 460 / 680: Vulkan names it "Adreno (TM) 610"). The one recorded report of it (above) is
+// that the 2x floor made the picture dark and flickering, and 2x is a cost this GPU cannot spare, so it never gets the
+// floor, whatever [Performance] AdrenoFix says (a settings file written before that row mattered keeps "Auto", and the
+// phone paid for 2x without anyone choosing it). MHGU_ADRENO_FLOOR=1 puts the old behaviour back, for a test.
+static bool adreno610_class(void) {
+    static int v = -1;
+    if (!g_vk.props.deviceName[0]) return false;  // (the device is not made yet: asked again later)
+    if (v < 0) {
+        const char *e = getenv("MHGU_ADRENO_FLOOR");
+        v = strstr(g_vk.props.deviceName, "Adreno") && strstr(g_vk.props.deviceName, "610") && !(e && *e && *e != '0');
+    }
+    return v;
+}
 static uint32_t msaa_floor(uint32_t s) {
     if (s > 1 || g_vk.api12 || !strstr(g_vk.props.deviceName, "Adreno") || g_config.render_h >= 720 || !(g_vk.msaa_counts & 2)) return s;
+    if (adreno610_class()) {
+        static bool said;
+        if (!said) LOG("[vk] MSAA as set: Adreno 610 class GPU never gets the 2x floor (MHGU_ADRENO_FLOOR=1: it does)\n");
+        said = true;
+        return s;
+    }
     if (g_config.adreno_fix) {
         static bool said;
         if (!said) LOG("[vk] MSAA as set: AdrenoFix is off (this driver may repeat a small picture without MSAA)\n");
@@ -483,7 +502,8 @@ static uint32_t msaa_floor(uint32_t s) {
     return 2;
 }
 bool vk_gpu_adreno(void) { return strstr(g_vk.props.deviceName, "Adreno") != NULL; }
-bool vk_gpu_adreno_fix_applies(void) { return vk_gpu_adreno() && !g_vk.api12; }  // ([Performance] AdrenoFix: its menu row)
+// ([Performance] AdrenoFix: its menu row; not on an Adreno 610, where both of its values do the same)
+bool vk_gpu_adreno_fix_applies(void) { return vk_gpu_adreno() && !g_vk.api12 && !adreno610_class(); }
 
 // (platform/android_perf.c, the minute's [mem] line) VMA's VkDeviceMemory blocks, its allocations and their bytes
 void vk_mem_summary(char *out, size_t size) {

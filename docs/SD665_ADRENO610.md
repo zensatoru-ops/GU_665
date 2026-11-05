@@ -42,6 +42,16 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
 6. **`android_perf.c`'s CPU masks** use raw `sched_*affinity` system calls: the build force-includes `volk.h` ahead of
    the file's `_GNU_SOURCE`, which hid `cpu_set_t` (found by building with the NDK).
 
+7. **No 2x MSAA floor on an Adreno 610** (`device.c` `adreno610_class`, `msaa_floor`): the floor that keeps 2x MSAA on Adreno +
+   Vulkan 1.1 below 720 lines is never applied when the GPU's name is "Adreno (TM) 610", whatever `[Performance] AdrenoFix`
+   says. Before, only a first-run file got `AdrenoFix = Off`; a phone whose ini already said `Auto` (the default) paid for 2x
+   without choosing it, and the only report of this GPU (above) is that the floor made it dark and flickering. The menu's
+   Adreno fix row is hidden there (both values would do the same). `MHGU_ADRENO_FLOOR=1`: the old behaviour, for a test. If
+   the 3D picture repeats in a grid at a low resolution with this, that is the bug the floor was for: say so, with the log.
+8. **The hot threads stay on the big cores** (`android_perf.c` `hot_thread_to_big_cores`, called from `perf_hint_thread` the
+   first time a thread gives a role: the game's update thread, the presenting one, the one translating command lists; SD665
+   class only). Affinity only, no priority change. Logged as `[perf] thread <tid>: 4 big cores`. `MHGU_HOT_PIN=0` turns it off.
+
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,
 `neon_rt.h` (the `GAMELIB_ID` inputs: changing them makes every player run `build_game.py` again; `ci/build_native.sh`
 fails if the id moves), `maxwell/translate.c` and `shader.h` (`SHADER_ID`: it invalidates the shader cache), the
@@ -62,7 +72,9 @@ MHGU_VK_STATS=1
   run, start again: the file must be there.
 - Heat: `/sys/class/power_supply/battery/current_now` and `voltage_now` while not charging (CLAUDE.md), or the counter's
   temperature, 15 minutes at the same place.
-- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0` each take one change away.
+- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0`, `MHGU_HOT_PIN=0`, `MHGU_ADRENO_FLOOR=1` each take
+  one change away. Change one at a time, same place in the same hunt, read the on-screen counter, and note the
+  `[vk] MSAA` line of `log.txt` (it says whether 2x is on).
 - Log lines to look for at start: `[perf] Adreno 610 class SoC`, `[perf] cores: 4 little, 4 big`, `[config] Adreno 610 class
   phone, first run`.
 

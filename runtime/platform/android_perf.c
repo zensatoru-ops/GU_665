@@ -108,6 +108,7 @@ static _Atomic uint32_t presents;  // frames presented so far: the number of the
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread unsigned t_roles;  // the roles this thread has given already
 static __thread int t_slot = -1;   // its entry in thr (-1: none, the table was full)
+static void hot_thread_to_big_cores(void);  // (Snapdragon 665 class, below)
 
 void perf_hint_thread(int role) {
     unsigned bit = 1u << role;
@@ -117,6 +118,7 @@ void perf_hint_thread(int role) {
                                   memory_order_relaxed);
         return;
     }
+    if (!t_roles) hot_thread_to_big_cores();  // (this thread's first role: once per thread)
     t_roles |= bit;
     pid_t tid = gettid();
     uint32_t f = atomic_load_explicit(&presents, memory_order_relaxed);
@@ -475,7 +477,7 @@ bool plat_weak_soc(void) {
     for (size_t i = 0; i < sizeof models / sizeof *models; i++)
         if (!strcasecmp(model, models[i])) on = 1;
     v = on;
-    if (v) LOG("[perf] Adreno 610 class SoC (board %s, model %s): background work on the little cores\n", plat, model[0] ? model : "?");
+    if (v) LOG("[perf] Adreno 610 class SoC (board %s, model %s): background work on the little cores, game threads on the big ones\n", plat, model[0] ? model : "?");
     return v;
 }
 
@@ -511,6 +513,7 @@ static bool mask_apply(const CpuMask *m) { return syscall(SYS_sched_setaffinity,
 // The little cores: those with a clearly lower capacity (cpu_capacity, or the top frequency where the kernel gives no
 // capacity: the Snapdragon 665's 1.8 against 2.0 GHz is 90%). False when they cannot be told, or fewer than two of
 // either kind exist: then nothing is pinned.
+static CpuMask found_big;  // (the others, set with the little ones: big_cores)
 static bool little_cores(CpuMask *set) {
     static int known = -1;
     static CpuMask found;
@@ -524,9 +527,10 @@ static bool little_cores(CpuMask *set) {
         }
         int little = 0, big = 0;
         memset(&found, 0, sizeof found);
+        memset(&found_big, 0, sizeof found_big);
         for (int i = 0; ok && i < n; i++) {
             if (v[i] * 100 < top * 95) mask_set(&found, i), little++;
-            else big++;
+            else mask_set(&found_big, i), big++;
         }
         known = ok && little >= 2 && big >= 2;
         LOG("[perf] cores: %d little, %d big (%s)\n", little, big, known ? "background work goes to the little ones" : "no split: nothing pinned");
@@ -564,4 +568,25 @@ void plat_background_work(bool on) {
         if (nice_restorable()) setpriority(PRIO_PROCESS, (id_t)tid, 0);
         cur = 0;
     }
+}
+
+// The threads the frame rate rests on (the game's update thread, the presenting one, the one translating command lists:
+// perf_hint_thread's roles) stay on the big cores on a Snapdragon 665 class phone. Android 10 gives them no hint (ADPF is
+// API 33), and a thread that wakes every frame for a few milliseconds is what a scheduler leaves on a little core
+// (Cortex-A53 class, about a third of a big one's speed here) after a quiet moment, until its load tracking catches up.
+// Only the affinity changes (no priority: a game thread above the system's own would only starve the driver's threads).
+// MHGU_HOT_PIN=0 turns it off. Not measured on a device yet: MHGU_ADPF_LOG=1 shows each thread's CPU time per frame.
+static void hot_thread_to_big_cores(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("MHGU_HOT_PIN");
+        enabled = e && *e ? atoi(e) != 0 : plat_weak_soc();
+    }
+    if (!enabled) return;
+    CpuMask little, now, big;
+    if (!little_cores(&little) || !mask_get(&now)) return;
+    big = found_big;
+    for (int i = 0; i < MASK_WORDS; i++) big.w[i] &= now.w[i];  // (only what this thread may use already)
+    if (mask_count(&big) < 2 || !mask_apply(&big)) return;
+    LOG("[perf] thread %d: %d big cores\n", (int)gettid(), mask_count(&big));
 }
