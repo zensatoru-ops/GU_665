@@ -235,15 +235,45 @@ static void regroup(APerformanceHintSession *s, int n) {
 }
 
 // MHGU_ADPF_LOG: the period's frames, reported work, each thread's CPU time per frame, thermal state
+static long sys_long(const char *path) {  // (a sysfs number, -1 where the file is missing or the system does not let the app read it)
+    FILE *f = fopen(path, "r");
+    long v = -1;
+    if (!f) return -1;
+    if (fscanf(f, "%ld", &v) != 1) v = -1;
+    fclose(f);
+    return v;
+}
+
+// (the SD665 class's own log, log_on == 2) the clocks the frames ran at: each CPU's current frequency, the GPU's current and
+// highest, its busy share. A phone that holds its GPU or its big cores at a low clock in a hunt shows it here.
+static int clocks_text(char *out, size_t size) {
+    int o = snprintf(out, size, " | cpu MHz");
+    for (int c = 0; c < 8 && o < (int)size - 24; c++) {
+        char p[80];
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", c);
+        long k = sys_long(p);
+        o += snprintf(out + o, size - (size_t)o, "%s%ld", c ? "/" : " ", k > 0 ? k / 1000 : -1);
+    }
+    long cur = sys_long("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq");
+    if (cur < 0) cur = sys_long("/sys/class/kgsl/kgsl-3d0/gpuclk");
+    long max = sys_long("/sys/class/kgsl/kgsl-3d0/max_gpuclk"), busy = sys_long("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage");
+    if (o < (int)size - 60)
+        o += snprintf(out + o, size - (size_t)o, " | gpu MHz %ld (max %ld) busy %ld%%", cur > 0 ? cur / 1000000 : -1, max > 0 ? max / 1000000 : -1, busy);
+    return o;
+}
+
 static void log_frame(uint64_t work, bool have_session) {
     static uint64_t t0, frames, work_sum, work_max;
     static AThermalManager *tm;
     static bool tm_tried;
+    static int lines;
     frames++, work_sum += work;
     if (work > work_max) work_max = work;
     uint64_t now = plat_now_ns();
     if (!t0) t0 = now;
-    if (now - t0 < 2000000000ull) return;
+    if (log_on == 2 && lines >= 40) return;  // (the automatic log: 15 s apart, 40 lines in all)
+    if (now - t0 < (log_on == 2 ? 15000000000ull : 2000000000ull)) return;
+    lines++;
     char line[600];
     int o = snprintf(line, sizeof line, "[perf] 2s: %llu frames, work %.2f ms avg %.2f max, target %.2f ms%s |",
                      (unsigned long long)frames, work_sum / 1e6 / frames, work_max / 1e6,
@@ -268,6 +298,7 @@ static void log_frame(uint64_t work, bool have_session) {
         o += snprintf(line + o, sizeof line - o, " | thermal headroom %.2f, status %d", h,
                       fn.thermal_status ? fn.thermal_status(tm) : -1);
     }
+    if (log_on == 2 && o < (int)sizeof line - 160) o += clocks_text(line + o, sizeof line - (size_t)o);
     LOG("%s\n", line);
     t0 = now, frames = work_sum = work_max = 0;
 }
@@ -382,6 +413,7 @@ void perf_hint_frame(void) {
     if (log_on < 0) {  // (the first present: the environment)
         const char *e = getenv("MHGU_ADPF_LOG");
         log_on = e && *e && strcmp(e, "0") != 0;
+        if (!(e && *e) && plat_weak_soc()) log_on = 2;  // (the SD665 class: the line every 15 s, with the clocks; MHGU_ADPF_LOG=0 turns it off)
         e = getenv("MHGU_ADPF_TARGET");
         if (e && atoi(e) > 0) pct = atoi(e) < 25 ? 25 : atoi(e) > 400 ? 400 : atoi(e);
         e = getenv("MHGU_ADPF");
@@ -583,6 +615,17 @@ static void hot_thread_to_big_cores(void) {
         enabled = e && *e ? atoi(e) != 0 : plat_weak_soc();
     }
     if (!enabled) return;
+    // (a little more weight than the other threads of the app and the system's own on the same cores: the render thread is
+    // what the frame waits for in most of a hunt. Negative nice needs the app's RLIMIT_NICE, Android's init sets 40: where
+    // it is refused nothing changes. MHGU_HOT_NICE=<-10..0> sets it, 0: none)
+    static int hot_nice = 1;  // (1: not read yet)
+    if (hot_nice > 0) {
+        const char *e = getenv("MHGU_HOT_NICE");
+        hot_nice = e && *e ? atoi(e) : -4;
+        hot_nice = hot_nice > 0 ? 0 : hot_nice < -10 ? -10 : hot_nice;
+    }
+    if (hot_nice < 0 && setpriority(PRIO_PROCESS, (id_t)gettid(), hot_nice) == 0)
+        LOG("[perf] thread %d: nice %d\n", (int)gettid(), hot_nice);
     CpuMask little, now, big;
     if (!little_cores(&little) || !mask_get(&now)) return;
     big = found_big;

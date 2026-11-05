@@ -72,6 +72,14 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
     `control.txt` and a test build. On this class one frame is profiled 40 s after the first frame and then every 60 s, 12 in all
     (a hitch of one frame each), logged as `[gpuprof] ...` in `log.txt` (each pass labelled with the fragment program of its first draw, `1st fs <hash>`) with a header line (3D size, HUD size, FPS limit,
     MSAA, shadows, bloom, Low-end). `MHGU_GPUPROF_AUTO=<seconds>` sets the period on any device (test builds), 0 never.
+13. **The frames' CPU time and the clocks, in the log** (`android_perf.c` `log_frame`, `clocks_text`, SD665 class by default): one `[perf] 2s: ...`
+    line every 15 s (40 at most): frames in the period, each thread's CPU time per frame (average / max), and `cpu MHz` of the 8
+    cores, `gpu MHz` (current, max) and its busy share, where the system lets the app read them (`-1`: not readable).
+    `MHGU_ADPF_LOG=0` turns it off. The first log of a phone showed two scene passes (27 of 40 ms in a hunt) that barely
+    shrank from a 3D picture of 770x356 to 936x432: not pixel bound. The lines say whether a core or the GPU sits at a low clock,
+    and whether the render thread's CPU time per frame is near the frame period.
+14. **The hot threads get nice -4** (`hot_thread_to_big_cores`): a little more weight than the other threads on the same cores.
+    `MHGU_HOT_NICE=<-10..0>` sets it, 0 none (MHGU_HOT_PIN=0 turns off this and the pinning).
 
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,
 `neon_rt.h` (the `GAMELIB_ID` inputs: changing them makes every player run `build_game.py` again; `ci/build_native.sh`
