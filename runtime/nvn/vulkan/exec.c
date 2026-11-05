@@ -1575,12 +1575,42 @@ static uint32_t noload_clears(uint32_t w, uint32_t h, bool stencil, VkClearValue
     return got;
 }
 
+// The barrier before every render pass. vk_full_barrier makes everything before it (all stages, all writes) visible to
+// everything after it, which on a tiler (Adreno) also keeps the next pass's geometry work from starting until the previous
+// pass has finished drawing. MHGU_VK_LITEBARRIER=1 (an experiment, off by default; for an Adreno 610 A/B): two barriers
+// instead. 1: transfers, compute and host writes are visible to every later stage, as before (the uniform and vertex data
+// the guest's copies make). 2: the rest (the previous passes' attachment writes) are visible to the later fragment stages,
+// tests, attachment output, transfers and compute only: the next pass's vertex work does not wait for them. What this
+// leaves out is a vertex shader reading what an earlier pass drew or a fragment shader stored; the game does not, as far as
+// is known, but a picture that flickers or goes wrong with it on says it does: MHGU_VK_LITEBARRIER=0 (or leave it out).
+static void pass_begin_barrier(VkCommandBuffer cb) {
+    static int lite = -1;
+    if (lite < 0) {
+        const char *e = getenv("MHGU_VK_LITEBARRIER");
+        lite = e && *e && *e != '0';
+        if (lite) LOG("[vk] light pass barriers (MHGU_VK_LITEBARRIER=1): the next pass's vertex work does not wait for the last pass\n");
+    }
+    if (!lite) { vk_full_barrier(cb); return; }
+    VkMemoryBarrier a = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                         .dstAccessMask = VK_ACCESS_ALL};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_STAGES_ALL, 0, 1, &a, 0, NULL, 0, NULL);
+    const VkPipelineStageFlags later = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                       VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    VkMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_ALL_WRITES,
+                         .dstAccessMask = VK_ACCESS_ALL & ~(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                                                            VK_ACCESS_INDIRECT_COMMAND_READ_BIT)};
+    vkCmdPipelineBarrier(cb, VK_STAGES_ALL, later, 0, 1, &b, 0, NULL, 0, NULL);
+}
+
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
-    vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    pass_begin_barrier(cb);  // passes, copies and dispatches see each other's results (see above for the light version)
     VkImageView views[9];
     TexBackend *att[9];  // per view: its image, the format it's rendered as, colour index (-1 depth)
     VkFormat att_fmt[9];

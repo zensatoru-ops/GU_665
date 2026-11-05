@@ -52,6 +52,17 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
    first time a thread gives a role: the game's update thread, the presenting one, the one translating command lists; SD665
    class only). Affinity only, no priority change. Logged as `[perf] thread <tid>: 4 big cores`. `MHGU_HOT_PIN=0` turns it off.
 
+9. **The HUD at most 720 lines on this class** (`config.c`, Low-end mode On): the Low-end rule keeps the HUD at the screen's size up
+   to twice the 3D picture's height; at 40% of a 1080-line screen that is 864 lines, 4 times the 3D's pixels, alpha blended
+   and copied to the window. Capped at 720 (what 25 to 36% already got). Toaster keeps its 540. `MHGU_HUD_LINES=<lines>`
+   sets it for a test (360 and up), e.g. 540 or 1080.
+10. **Light pass barriers, an experiment, off by default** (`exec.c` `pass_begin_barrier`, `MHGU_VK_LITEBARRIER=1`): the barrier
+   before every render pass is all stages to all stages, which on a tiler keeps the next pass's geometry work from
+   starting until the last pass has finished drawing. The light version is two barriers: transfers, compute and host
+   writes visible to every stage as before, and the passes' attachment writes visible to the later fragment stages, tests,
+   output, transfers and compute only. It leaves out a vertex shader reading what an earlier pass drew or a fragment shader
+   stored. Whether this driver gains from it is not known: A/B it, and watch the picture for flicker or missing parts.
+
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,
 `neon_rt.h` (the `GAMELIB_ID` inputs: changing them makes every player run `build_game.py` again; `ci/build_native.sh`
 fails if the id moves), `maxwell/translate.c` and `shader.h` (`SHADER_ID`: it invalidates the shader cache), the
@@ -72,7 +83,7 @@ MHGU_VK_STATS=1
   run, start again: the file must be there.
 - Heat: `/sys/class/power_supply/battery/current_now` and `voltage_now` while not charging (CLAUDE.md), or the counter's
   temperature, 15 minutes at the same place.
-- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0`, `MHGU_HOT_PIN=0`, `MHGU_ADRENO_FLOOR=1` each take
+- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0`, `MHGU_HOT_PIN=0`, `MHGU_ADRENO_FLOOR=1`, `MHGU_HUD_LINES=<n>`, `MHGU_VK_LITEBARRIER=1` each change
   one change away. Change one at a time, same place in the same hunt, read the on-screen counter, and note the
   `[vk] MSAA` line of `log.txt` (it says whether 2x is on).
 - Log lines to look for at start: `[perf] Adreno 610 class SoC`, `[perf] cores: 4 little, 4 big`, `[config] Adreno 610 class

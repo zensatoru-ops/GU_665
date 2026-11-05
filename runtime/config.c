@@ -1213,6 +1213,13 @@ void config_load(void) {
             // pixels of the 3D at 33%, and a phone with an Adreno 710 was slower with LowEnd than without)
             // (Toaster: at most TOASTER_HUD_LINES, for the HUD, the game's last draw and the window's copy)
             int ow, oh, cap = g_config.low_end == LOW_END_TOASTER ? TOASTER_HUD_LINES : h * 2 > 720 ? h * 2 : 720;
+#ifdef __ANDROID__
+            // (Adreno 610 class: at most 720 lines whatever the 3D's size. At 40% of a 1080-line screen the rule above gives
+            // 864, a HUD of 4 times the 3D's pixels, alpha blended over the picture and copied to the window: 30% more than
+            // 720 for this GPU's bandwidth. MHGU_HUD_LINES=<lines> sets it for a test (any device), 0 = the rule above)
+            if (g_config.low_end != LOW_END_TOASTER && plat_weak_soc() && cap > 720) cap = 720;
+            if ((e = getenv("MHGU_HUD_LINES")) && atoi(e) > 0) cap = atoi(e) < 360 ? 360 : atoi(e);
+#endif
             if (th > cap) fit_aspect(tw * cap / th, cap, aspect, &ow, &oh);
             else fit_aspect(tw, th, aspect, &ow, &oh);
             g_fsr_output[0] = (uint32_t)ow, g_fsr_output[1] = (uint32_t)oh;
