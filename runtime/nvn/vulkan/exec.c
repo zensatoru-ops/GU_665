@@ -1151,7 +1151,38 @@ static void gp_mark(const char *label) {
 
 void vk_gpuprof_mark(const char *label) { gp_mark(label); }  // (device.c: the window image's pass)
 
+// The Adreno 610 class takes its own GPU profile now and then, so a log from a phone that cannot type into control.txt
+// says which pass costs what: the first one FIRST_S seconds after the first frame, then every EVERY_S, GP_AUTO_MAX in all
+// (one frame each: timestamps between the passes, a frame's time a little longer). MHGU_GPUPROF_AUTO=<seconds> sets the period on any
+// device (0: never). The lines are "[gpuprof] ..." in log.txt, with a header line of the 3D size, the HUD size and the settings.
+#define GP_AUTO_FIRST_S 40
+#define GP_AUTO_MAX 12
+static void gpuprof_auto(void) {
+    static int every = -1, taken;
+    static uint64_t next;
+    if (every < 0) {
+        const char *e = getenv("MHGU_GPUPROF_AUTO");
+        every = e && *e ? atoi(e) : 0;
+#ifdef __ANDROID__
+        if (!(e && *e) && plat_weak_soc()) every = 60;
+#endif
+        if (every > 0) LOG("[gpuprof] a profile frame every %d s (MHGU_GPUPROF_AUTO=0: none)\n", every);
+    }
+    if (every <= 0 || taken >= GP_AUTO_MAX || gp_active || g_gpuprof_request) return;
+    uint64_t now = plat_now_ns();
+    if (!next) next = now + (uint64_t)GP_AUTO_FIRST_S * 1000000000ull;
+    if (now < next) return;
+    next = now + (uint64_t)every * 1000000000ull;
+    taken++;
+    extern uint32_t g_fsr_output[2];
+    LOG("[gpuprof] auto %d of %d: 3D %ux%u, HUD %ux%u, %.0f FPS limit, MSAA %ux, shadows %d, bloom %d, low-end %d\n", taken, GP_AUTO_MAX,
+        g_render_size[0], g_render_size[1], g_fsr_output[0], g_fsr_output[1], config_live_fps(), g_vk.msaa,
+        config_live_shadows(), config_live_bloom(), g_config.low_end);
+    g_gpuprof_request = 1;
+}
+
 void vk_gpuprof_frame(void) {  // (device.c, after each presented frame's submission)
+    gpuprof_auto();
     if (gp_active) {
         gp_active = 0;
         uint64_t t[256];

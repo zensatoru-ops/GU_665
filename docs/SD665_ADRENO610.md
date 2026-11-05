@@ -68,6 +68,10 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
     own scissor. Shadows stay on and are drawn as before. Logged as `[vk] shadow atlas WxH: a N-vertex draw is a clear`
     (the first three, then every 3000th). `MHGU_SHADOW_CLEARDRAW=0` off, `=1` on any device. If a shadow caster is missing or the
     shadows look wrong with it, the match was too wide: send that log line.
+12. **A GPU profile of its own** (`exec.c` `gpuprof_auto`, SD665 class by default): `gpuprof` takes one frame's time per pass, but needs
+    `control.txt` and a test build. On this class one frame is profiled 40 s after the first frame and then every 60 s, 12 in all
+    (a hitch of one frame each), logged as `[gpuprof] ...` in `log.txt` with a header line (3D size, HUD size, FPS limit,
+    MSAA, shadows, bloom, Low-end). `MHGU_GPUPROF_AUTO=<seconds>` sets the period on any device (test builds), 0 never.
 
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,
 `neon_rt.h` (the `GAMELIB_ID` inputs: changing them makes every player run `build_game.py` again; `ci/build_native.sh`
