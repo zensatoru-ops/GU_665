@@ -4114,9 +4114,38 @@ static bool shadow_skipped(void) {
     return true;
 }
 
+// The game clears its shadow atlas with draws, not a clear (see shadow_skipped): three of them, a few vertices each, depth
+// test Always, depth written, nothing else, into a depth-only target that is not the picture's size. On a Mali they were 2.3 ms
+// of the shadow pass's 2.8. Here such a draw is the clear it stands for, to the far depth (the value shadow_skipped clears
+// to, and Shadows Off showed it is the one nothing is in the way of), within the draw's own scissor: vkCmdClearAttachments,
+// no pipeline, no fragment work. The shadows stay on and are drawn as before.
+// On the Adreno 610 class by default; MHGU_SHADOW_CLEARDRAW=1 anywhere, =0 never. A draw of that kind that is not a
+// clear would leave a shadow caster out (a hole in the shadows): that, or shadows that look wrong, is the sign to turn it off.
+static bool shadow_clear_draw(CmdRec *r) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MHGU_SHADOW_CLEARDRAW");
+        on = e && *e ? atoi(e) != 0 : 0;
+#ifdef __ANDROID__
+        if (!(e && *e)) on = plat_weak_soc();
+#endif
+        if (on) LOG("[vk] shadow atlas clear draws become clears (MHGU_SHADOW_CLEARDRAW=0: off)\n");
+    }
+    if (!on || st.rt.ncolor || !st.rt.depth || (uint32_t)r->x[2] > 6) return false;
+    NvnTexture *d = st.rt.depth;
+    if ((d->width < 512 && d->height < 512) || (d->width == g_render_size[0] && d->height == g_render_size[1])) return false;
+    if (!st.ds[0] || !st.ds[1] || compare_fn(st.ds[2]) != VK_COMPARE_OP_ALWAYS || st.ds[3]) return false;  // (Always, written, no stencil)
+    static unsigned seen;
+    if (seen++ < 3 || seen % 3000 == 0)
+        LOG("[vk] shadow atlas %ux%u: a %u-vertex draw is a clear (%u so far)\n", d->width, d->height, (unsigned)r->x[2], seen);
+    clear(-1, 0, NULL, 0, true, 1.0f, false, 0, 0);
+    return true;
+}
+
 static void draw(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     if (shadow_skipped()) { stat_skipped++; return; }
+    if (shadow_clear_draw(r)) { stat_skipped++; return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;

@@ -62,6 +62,12 @@ Which phones: the SoCs with an Adreno 610, recognised by `ro.board.platform` / `
    writes visible to every stage as before, and the passes' attachment writes visible to the later fragment stages, tests,
    output, transfers and compute only. It leaves out a vertex shader reading what an earlier pass drew or a fragment shader
    stored. Whether this driver gains from it is not known: A/B it, and watch the picture for flicker or missing parts.
+11. **The shadow atlas's clear draws are clears** (`exec.c` `shadow_clear_draw`, SD665 class by default): the game clears its shadow
+    atlas with three draws (a few vertices, depth test Always, depth written, depth-only target that is not the picture's
+    size), 2.3 of the shadow pass's 2.8 ms on a Mali. Such a draw is now `vkCmdClearAttachments` to the far depth within its
+    own scissor. Shadows stay on and are drawn as before. Logged as `[vk] shadow atlas WxH: a N-vertex draw is a clear`
+    (the first three, then every 3000th). `MHGU_SHADOW_CLEARDRAW=0` off, `=1` on any device. If a shadow caster is missing or the
+    shadows look wrong with it, the match was too wide: send that log line.
 
 Not touched on purpose: `tools/gen.py`, `lifter.py`, `neon.py`, `nso.py`, `gamelib.h`, `hle_symbols.txt`, `cpu.h`, `vfp.h`,
 `neon_rt.h` (the `GAMELIB_ID` inputs: changing them makes every player run `build_game.py` again; `ci/build_native.sh`
@@ -83,7 +89,7 @@ MHGU_VK_STATS=1
   run, start again: the file must be there.
 - Heat: `/sys/class/power_supply/battery/current_now` and `voltage_now` while not charging (CLAUDE.md), or the counter's
   temperature, 15 minutes at the same place.
-- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0`, `MHGU_HOT_PIN=0`, `MHGU_ADRENO_FLOOR=1`, `MHGU_HUD_LINES=<n>`, `MHGU_VK_LITEBARRIER=1` each change
+- A/B: `MHGU_BG_THREADS=0`, `MHGU_SOC_PROFILE=none`, `MHGU_PCACHE_SAVE_S=0`, `MHGU_HOT_PIN=0`, `MHGU_ADRENO_FLOOR=1`, `MHGU_HUD_LINES=<n>`, `MHGU_VK_LITEBARRIER=1`, `MHGU_SHADOW_CLEARDRAW=0` each change
   one change away. Change one at a time, same place in the same hunt, read the on-screen counter, and note the
   `[vk] MSAA` line of `log.txt` (it says whether 2x is on).
 - Log lines to look for at start: `[perf] Adreno 610 class SoC`, `[perf] cores: 4 little, 4 big`, `[config] Adreno 610 class
